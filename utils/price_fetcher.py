@@ -1,174 +1,132 @@
-import yfinance as yf
+# utils/price_fetcher.py
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import pyupbit
-import numpy as np
+import FinanceDataReader as fdr  # pip install finance-datareader [web:259]
 
-def get_exchange_rate():
-    """USD/KRW 환율 조회"""
+DEFAULT_FX = 1300.0
+
+def detect_ticker_type(ticker: str) -> str:
+    t = ticker.upper()
+    if t.startswith("KRW-"):
+        return "upbit"
+    if t.endswith(".KS") or t.endswith(".KQ"):
+        return "korean_stock"
+    return "us_stock"
+
+def get_currency_for_ticker(ticker: str) -> str:
+    tt = detect_ticker_type(ticker)
+    return "KRW" if tt in ("upbit", "korean_stock") else "USD"
+
+def _kr_symbol(ticker: str) -> str:
+    # "000660.KS" -> "000660"
+    t = ticker.upper()
+    if t.endswith(".KS") or t.endswith(".KQ"):
+        return t.split(".")[0]
+    return t
+
+def get_exchange_rate() -> float:
+    """
+    USD/KRW 환율 (FDR)
+    """
     try:
-        ticker = yf.Ticker("KRW=X")
-        data = ticker.history(period='5d') # 기간 늘림
-        if not data.empty and not data['Close'].dropna().empty:
-            return float(data['Close'].dropna().iloc[-1]) # NaN 제외 후 마지막 값
-        return 1300.0
+        df = fdr.DataReader("USD/KRW")
+        if df is not None and not df.empty and "Close" in df.columns:
+            return float(df["Close"].dropna().iloc[-1])
     except Exception as e:
-        print(f"환율 조회 실패: {e}")
-        return 1300.0
+        print(f"환율 조회 실패(FDR): {e}")
+    return DEFAULT_FX
 
-def detect_ticker_type(ticker):
-    """티커 유형 감지"""
-    ticker_upper = ticker.upper()
-    if ticker_upper.startswith('KRW-'): return 'upbit'
-    if ticker_upper.endswith('.KS') or ticker_upper.endswith('.KQ'): return 'korean_stock'
-    return 'us_stock'
-
-def get_current_price(ticker):
-    """현재가 조회 (자동 감지)"""
-    ticker_type = detect_ticker_type(ticker)
-    if ticker_type == 'upbit':
-        return get_upbit_price(ticker)
-    else:
-        return get_stock_price(ticker)
-
-def get_stock_price(ticker):
-    """주식 현재가 조회 (단일)"""
-    try:
-        stock = yf.Ticker(ticker)
-        # 1일 대신 5일치 데이터를 가져와 안전장치 확보
-        data = stock.history(period='5d')
-        
-        # 데이터가 있고, Close 컬럼의 유효한 값이 하나라도 있다면
-        if not data.empty and not data['Close'].dropna().empty:
-            return float(data['Close'].dropna().iloc[-1])
-            
-        return None
-    except Exception as e:
-        print(f"Error fetching stock price for {ticker}: {e}")
-        return None
-
-def get_upbit_price(ticker):
-    """업비트 현재가"""
+def get_upbit_price(ticker: str):
     try:
         price = pyupbit.get_current_price(ticker)
-        if price:
-            return float(price)
-        return None
+        return float(price) if price else None
     except Exception as e:
         print(f"Error fetching Upbit price for {ticker}: {e}")
         return None
 
+def get_stock_price(ticker: str):
+    """
+    주식 현재가 (FDR)
+    - KR: 000660.KS / 308080.KQ 같은 입력을 받아도 동작하도록 심볼 정규화
+    - US: AAPL, MSFT 그대로
+    """
+    try:
+        tt = detect_ticker_type(ticker)
+        sym = _kr_symbol(ticker) if tt == "korean_stock" else ticker
+
+        df = fdr.DataReader(sym)
+        if df is None or df.empty or "Close" not in df.columns:
+            return None
+        s = df["Close"].dropna()
+        return float(s.iloc[-1]) if not s.empty else None
+    except Exception as e:
+        print(f"Error fetching stock price (FDR) for {ticker}: {e}")
+        return None
+
+def get_current_price(ticker: str):
+    tt = detect_ticker_type(ticker)
+    if tt == "upbit":
+        return get_upbit_price(ticker)
+    return get_stock_price(ticker)
+
 def get_multiple_prices(tickers):
-    """여러 종목 현재가 한번에 조회 (NaN 방지 로직 적용)"""
+    """
+    여러 종목 현재가 조회:
+    - Upbit은 bulk
+    - 주식은 FDR 개별 호출 (US 20 + KR 3 => 23회, 버튼 기반이면 충분히 감당 가능)
+    """
     prices = {}
     if not tickers:
-        return {}
-    
+        return prices
+
+    tickers = list(set(tickers))
+
     # 분류
-    us_stocks = []
-    korean_stocks = []
-    upbit_tickers = []
-    
-    for ticker in tickers:
-        ticker_type = detect_ticker_type(ticker)
-        if ticker_type == 'upbit':
-            upbit_tickers.append(ticker)
-        elif ticker_type == 'korean_stock':
-            korean_stocks.append(ticker)
-        else:
-            us_stocks.append(ticker)
-    
-    # === 미국 주식 일괄 조회 ===
-    if us_stocks:
-        try:
-            tickers_str = ' '.join(us_stocks)
-            # 5일치 데이터 요청 (주말/휴일/시차로 인한 NaN 방지)
-            data = yf.download(tickers_str, period='5d', progress=False, auto_adjust=False)
-            
-            if not data.empty:
-                closes = data['Close']
-                
-                if len(us_stocks) == 1:
-                    # 단일 종목 (Series)
-                    if not closes.dropna().empty:
-                        prices[us_stocks[0]] = float(closes.dropna().iloc[-1])
-                else:
-                    # 다중 종목 (DataFrame)
-                    # 각 컬럼(종목)별로 순회하며 마지막 유효값(valid value) 추출
-                    for ticker in us_stocks:
-                        if ticker in closes.columns:
-                            series = closes[ticker].dropna()
-                            if not series.empty:
-                                prices[ticker] = float(series.iloc[-1])
-                            else:
-                                print(f"Warning: No valid price data for {ticker}")
-        except Exception as e:
-            print(f"미국 주식 가격 조회 실패: {e}")
-            # 실패 시 개별 조회 시도 (Fallback)
-            for ticker in us_stocks:
-                p = get_stock_price(ticker)
-                if p: prices[ticker] = p
-    
-    # === 한국 주식 일괄 조회 ===
-    if korean_stocks:
-        try:
-            tickers_str = ' '.join(korean_stocks)
-            data = yf.download(tickers_str, period='5d', progress=False, auto_adjust=False)
-            
-            if not data.empty:
-                closes = data['Close']
-                
-                if len(korean_stocks) == 1:
-                    if not closes.dropna().empty:
-                        prices[korean_stocks[0]] = float(closes.dropna().iloc[-1])
-                else:
-                    for ticker in korean_stocks:
-                        if ticker in closes.columns:
-                            series = closes[ticker].dropna()
-                            if not series.empty:
-                                prices[ticker] = float(series.iloc[-1])
-        except Exception as e:
-            print(f"한국 주식 가격 조회 실패: {e}")
-            for ticker in korean_stocks:
-                p = get_stock_price(ticker)
-                if p: prices[ticker] = p
-    
-    # === 업비트 조회 ===
+    upbit_tickers = [t for t in tickers if detect_ticker_type(t) == "upbit"]
+    stock_tickers = [t for t in tickers if detect_ticker_type(t) != "upbit"]
+
+    # 업비트 bulk
     if upbit_tickers:
         try:
             upbit_prices = pyupbit.get_current_price(upbit_tickers)
-            if upbit_prices:
-                if isinstance(upbit_prices, dict):
-                    for ticker, price in upbit_prices.items():
-                        if price:
-                            prices[ticker] = float(price)
-                else:
-                    prices[upbit_tickers[0]] = float(upbit_prices)
+            if isinstance(upbit_prices, dict):
+                for t, p in upbit_prices.items():
+                    if p:
+                        prices[t] = float(p)
+            elif upbit_prices:
+                prices[upbit_tickers[0]] = float(upbit_prices)
         except Exception as e:
             print(f"업비트 가격 조회 실패: {e}")
 
+    # 주식 개별
+    for t in stock_tickers:
+        p = get_stock_price(t)
+        if p is not None:
+            prices[t] = float(p)
+
     return prices
 
-# ... 기존 historical 함수들은 유지 ...
-# (이전 단계에서 수정한 timezone safe 버전 사용)
 def get_historical_prices(ticker, start_date, end_date=None):
-    ticker_type = detect_ticker_type(ticker)
-    if ticker_type == 'upbit':
+    tt = detect_ticker_type(ticker)
+    if tt == "upbit":
         return get_upbit_historical(ticker, start_date, end_date)
-    else:
-        return get_stock_historical(ticker, start_date, end_date)
+    return get_stock_historical(ticker, start_date, end_date)
 
 def get_stock_historical(ticker, start_date, end_date=None):
+    """
+    주식 과거 가격 (FDR)
+    """
     try:
-        if end_date is None:
-            end_date = datetime.now().strftime('%Y-%m-%d')
-        stock = yf.Ticker(ticker)
-        data = stock.history(start=start_date, end=end_date, auto_adjust=False)
-        if not data.empty and data.index.tz is not None:
-            data.index = data.index.tz_localize(None)
-        return data
+        tt = detect_ticker_type(ticker)
+        sym = _kr_symbol(ticker) if tt == "korean_stock" else ticker
+        df = fdr.DataReader(sym, start_date, end_date)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        # 기존 calculator.py가 'Close' 컬럼을 쓰는 구조이므로 그대로 반환
+        return df
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error fetching historical (FDR) for {ticker}: {e}")
         return pd.DataFrame()
 
 def get_upbit_historical(ticker, start_date, end_date=None):
@@ -176,29 +134,24 @@ def get_upbit_historical(ticker, start_date, end_date=None):
         df = pyupbit.get_ohlcv(ticker, interval="day", count=200)
         if df is not None and not df.empty:
             df.columns = [col.capitalize() for col in df.columns]
-            if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
             df = df[df.index >= start_date]
             if end_date:
                 df = df[df.index <= end_date]
             return df
         return pd.DataFrame()
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
-def get_benchmark_data(benchmark='SPY', period='1y'):
+def get_benchmark_data(benchmark="SPY", period="1y"):
+    """
+    벤치마크도 FDR로 (SPY 등)
+    period를 start_date로 변환해서 사용
+    """
     try:
-        stock = yf.Ticker(benchmark)
-        data = stock.history(period=period, auto_adjust=False)
-        if not data.empty and data.index.tz is not None:
-            data.index = data.index.tz_localize(None)
-        return data
-    except Exception as e:
+        days_map = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+        days = days_map.get(period, 365)
+        start_date = (pd.Timestamp.now() - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+        df = fdr.DataReader(benchmark, start_date)
+        return df if df is not None else pd.DataFrame()
+    except Exception:
         return pd.DataFrame()
-
-def get_currency_for_ticker(ticker):
-    ticker_type = detect_ticker_type(ticker)
-    if ticker_type == 'upbit' or ticker_type == 'korean_stock':
-        return 'KRW'
-    else:
-        return 'USD'

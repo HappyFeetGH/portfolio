@@ -84,7 +84,7 @@ with col2:
             all_tickers = []
             for strategy in st.session_state.portfolio['strategies'].values():
                 all_tickers.extend(strategy['positions'].keys())
-            
+
             if all_tickers:
                 st.session_state.current_prices = get_multiple_prices(list(set(all_tickers)))
                 st.sidebar.success("✅ 가격 업데이트 완료")

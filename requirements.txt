@@ -4,3 +4,4 @@ numpy==1.26.2
 yfinance==0.2.33
 pyupbit==0.2.34
 plotly==5.18.0
+finance-datareader
