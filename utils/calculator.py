@@ -116,7 +116,7 @@ def calculate_portfolio_history(portfolio, current_prices, exchange_rate=1300.0,
     
     # 데이터프레임 생성
     df = pd.DataFrame(historical_data)
-    df = df.fillna(method='ffill').fillna(method='bfill')
+    df = df.ffill().bfill()
     
     # 날짜별 포트폴리오 가치 계산
     portfolio_values = []

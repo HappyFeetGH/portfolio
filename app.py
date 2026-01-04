@@ -1578,8 +1578,24 @@ elif menu == "📊 성과 분석":
                 # 2. 고급 지표 계산
                 metrics = calculate_advanced_metrics(history_df)
                 
-                # 3. 벤치마크(SPY) 데이터 비교용 로딩
-                bm_df = get_benchmark_data('SPY', period=f"{period_days}d")
+                # 3. 벤치마크(SPY) 데이터 - 안전하게 로딩
+                bm_df = pd.DataFrame()  # 기본값 빈 데이터프레임
+                try:
+                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+                    
+                    def load_benchmark():
+                        return get_benchmark_data('SPY', period=f"{period_days}d")
+                    
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(load_benchmark)
+                        try:
+                            bm_df = future.result(timeout=10)  # 10초 타임아웃
+                        except FutureTimeoutError:
+                            st.warning("⚠️ 벤치마크 로딩 시간 초과 (10초). 포트폴리오 데이터만 표시합니다.")
+                            bm_df = pd.DataFrame()
+                except Exception as e:
+                    st.info(f"ℹ️ 벤치마크 로딩 실패: {str(e)}")
+                    bm_df = pd.DataFrame()
                 
                 # --- [섹션 1] 핵심 지표 카드 ---
                 st.subheader("📌 핵심 성과 지표 (Key Metrics)")
@@ -1607,8 +1623,8 @@ elif menu == "📊 성과 분석":
                         line=dict(color='#1f77b4', width=2)
                     ))
                     
-                    # 벤치마크 (SPY)
-                    if not bm_df.empty:
+                    # 벤치마크 (SPY) - 있을 경우만 추가
+                    if not bm_df.empty and 'Close' in bm_df.columns:
                         # SPY 누적 수익률 계산
                         bm_df['return_pct'] = (bm_df['Close'] / bm_df['Close'].iloc[0] - 1) * 100
                         fig_compare.add_trace(go.Scatter(
