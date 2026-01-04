@@ -29,7 +29,8 @@ from utils.price_fetcher import (
 )
 from utils.calculator import (
     calculate_unrealized_pnl, calculate_portfolio_value, calculate_daily_realized_pnl,
-    calculate_strategy_metrics, export_to_csv, calculate_portfolio_history, calculate_portfolio_history_by_currency, calculate_total_realized_pnl_from_events
+    calculate_strategy_metrics, export_to_csv, calculate_portfolio_history, calculate_portfolio_history_by_currency, calculate_total_realized_pnl_from_events,
+    calculate_advanced_metrics, calculate_monthly_returns
 )
 
 # 페이지 설정
@@ -1546,3 +1547,122 @@ elif menu == "💾 데이터 관리":
                 st.info("백업 파일이 없습니다")
         else:
             st.info("백업 폴더가 없습니다")
+
+elif menu == "📊 성과 분석":
+    st.header("성과 분석 보고서")
+    
+    # 데이터 로딩
+    if not st.session_state.current_prices:
+        st.warning("⚠️ 먼저 사이드바에서 '가격 업데이트'를 진행해주세요.")
+    else:
+        # 기간 선택
+        col_p1, col_p2 = st.columns([1, 3])
+        with col_p1:
+            period_days = st.selectbox(
+                "분석 기간",
+                [30, 90, 180, 365, 730, 1000],
+                index=3,
+                format_func=lambda x: f"최근 {x}일"
+            )
+        
+        with st.spinner("성과 지표 계산 중..."):
+            # 1. 히스토리 데이터 생성
+            history_df = calculate_portfolio_history(
+                st.session_state.portfolio,
+                st.session_state.current_prices,
+                st.session_state.exchange_rate,
+                days=period_days
+            )
+            
+            if not history_df.empty:
+                # 2. 고급 지표 계산
+                metrics = calculate_advanced_metrics(history_df)
+                
+                # 3. 벤치마크(SPY) 데이터 비교용 로딩
+                bm_df = get_benchmark_data('SPY', period=f"{period_days}d")
+                
+                # --- [섹션 1] 핵심 지표 카드 ---
+                st.subheader("📌 핵심 성과 지표 (Key Metrics)")
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("CAGR (연평균)", f"{metrics['cagr']:.1f}%", help="연평균 복합 성장률")
+                m2.metric("MDD (최대낙폭)", f"{metrics['mdd']:.1f}%", help="고점 대비 최대 하락폭", delta_color="inverse")
+                m3.metric("Sharpe Ratio", f"{metrics['sharpe']:.2f}", help="위험 대비 수익 비율 (높을수록 좋음)")
+                m4.metric("Sortino Ratio", f"{metrics['sortino']:.2f}", help="하락 변동성만 고려한 위험 대비 수익")
+                m5.metric("승률 (Win Rate)", f"{metrics['win_rate']:.1f}%", help="일별 수익이 양수였던 비율")
+                
+                st.markdown("---")
+                
+                # --- [섹션 2] 수익률 비교 차트 (Portfolio vs SPY) ---
+                col_c1, col_c2 = st.columns([2, 1])
+                
+                with col_c1:
+                    st.subheader("📈 누적 수익률 비교")
+                    fig_compare = go.Figure()
+                    
+                    # 내 포트폴리오
+                    fig_compare.add_trace(go.Scatter(
+                        x=history_df['date'], 
+                        y=history_df['return_pct'],
+                        mode='lines', name='My Portfolio',
+                        line=dict(color='#1f77b4', width=2)
+                    ))
+                    
+                    # 벤치마크 (SPY)
+                    if not bm_df.empty:
+                        # SPY 누적 수익률 계산
+                        bm_df['return_pct'] = (bm_df['Close'] / bm_df['Close'].iloc[0] - 1) * 100
+                        fig_compare.add_trace(go.Scatter(
+                            x=bm_df.index, 
+                            y=bm_df['return_pct'],
+                            mode='lines', name='S&P 500 (SPY)',
+                            line=dict(color='gray', width=1, dash='dot')
+                        ))
+                    
+                    fig_compare.update_layout(height=400, hovermode='x unified', yaxis_title="누적 수익률 (%)")
+                    st.plotly_chart(fig_compare, use_container_width=True)
+
+                with col_c2:
+                    st.subheader("🌊 Underwater Plot (낙폭)")
+                    # 낙폭 영역 차트
+                    drawdown_series = metrics['daily_drawdown'] * 100
+                    fig_dd = go.Figure()
+                    fig_dd.add_trace(go.Scatter(
+                        x=history_df['date'], 
+                        y=drawdown_series,
+                        fill='tozeroy',
+                        mode='lines',
+                        line=dict(color='red', width=1),
+                        name='Drawdown'
+                    ))
+                    fig_dd.update_layout(height=400, yaxis_title="낙폭 (%)", hovermode='x unified')
+                    st.plotly_chart(fig_dd, use_container_width=True)
+
+                st.markdown("---")
+
+                # --- [섹션 3] 월별 수익률 히트맵 ---
+                st.subheader("📅 월별 수익률 히트맵")
+                monthly_df = calculate_monthly_returns(history_df)
+                
+                if not monthly_df.empty:
+                    # Pivot: Index=Year, Columns=Month
+                    heatmap_pivot = monthly_df.pivot(index="Year", columns="Month", values="Return")
+                    # 월 순서 정렬
+                    month_order = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+                    heatmap_pivot = heatmap_pivot.reindex(columns=month_order)
+                    
+                    fig_map = px.imshow(
+                        heatmap_pivot,
+                        labels=dict(x="월", y="년도", color="수익률(%)"),
+                        x=heatmap_pivot.columns,
+                        y=heatmap_pivot.index,
+                        color_continuous_scale="RdBu", # Red-Blue (중간 0)
+                        color_continuous_midpoint=0,
+                        text_auto='.1f'
+                    )
+                    fig_map.update_layout(height=400)
+                    st.plotly_chart(fig_map, use_container_width=True)
+                else:
+                    st.info("월별 데이터를 생성하기에 기간이 충분하지 않습니다.")
+
+            else:
+                st.info("분석할 히스토리 데이터가 없습니다. 포지션을 보유하고 있어야 합니다.")

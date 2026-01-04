@@ -441,3 +441,89 @@ def export_to_csv(portfolio, current_prices, exchange_rate=1300.0, filename='por
     df = pd.DataFrame(rows)
     df.to_csv(filename, index=False, encoding='utf-8-sig')
     return filename
+
+def calculate_advanced_metrics(history_df):
+    """
+    고급 성과 지표 계산 (CAGR, MDD, Sharpe, Sortino, Win Rate)
+    history_df: calculate_portfolio_history()의 리턴값 (daily)
+    """
+    if history_df.empty or len(history_df) < 2:
+        return None
+
+    # 일별 수익률 계산
+    df = history_df.copy()
+    df['daily_return'] = df['portfolio_value'].pct_change().fillna(0)
+    
+    # 1. CAGR (연평균 성장률)
+    start_val = df['portfolio_value'].iloc[0]
+    end_val = df['portfolio_value'].iloc[-1]
+    days = (df['date'].iloc[-1] - df['date'].iloc[0]).days
+    if days > 0 and start_val > 0:
+        cagr = (end_val / start_val) ** (365 / days) - 1
+    else:
+        cagr = 0.0
+
+    # 2. MDD (최대 낙폭)
+    roll_max = df['portfolio_value'].cummax()
+    daily_drawdown = (df['portfolio_value'] - roll_max) / roll_max
+    mdd = daily_drawdown.min() * 100  # 퍼센트
+
+    # 3. Sharpe Ratio (무위험 이자율 2% 가정)
+    risk_free_rate = 0.02
+    excess_returns = df['daily_return'] - (risk_free_rate / 252)
+    std = df['daily_return'].std()
+    if std > 0:
+        sharpe = np.sqrt(252) * (excess_returns.mean() / std)
+    else:
+        sharpe = 0.0
+
+    # 4. Sortino Ratio (하방 변동성만 고려)
+    downside_returns = df.loc[df['daily_return'] < 0, 'daily_return']
+    downside_std = downside_returns.std()
+    if downside_std > 0:
+        sortino = np.sqrt(252) * (excess_returns.mean() / downside_std)
+    else:
+        sortino = 0.0
+
+    # 5. Win Rate (승률)
+    wins = len(df[df['daily_return'] > 0])
+    total = len(df)
+    win_rate = (wins / total * 100) if total > 0 else 0.0
+
+    return {
+        'cagr': cagr * 100,
+        'mdd': mdd,
+        'sharpe': sharpe,
+        'sortino': sortino,
+        'win_rate': win_rate,
+        'daily_drawdown': daily_drawdown # 차트용 시리즈
+    }
+
+def calculate_monthly_returns(history_df):
+    """
+    월별 수익률 히트맵 데이터 생성
+    """
+    if history_df.empty:
+        return pd.DataFrame()
+
+    df = history_df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+    df.set_index('date', inplace=True)
+    
+    # 월별 리샘플링 (마지막 날짜 기준 가치 / 첫 날짜 기준 가치 - 1)
+    monthly = df['portfolio_value'].resample('M').last()
+    monthly_ret = monthly.pct_change().fillna(0) * 100
+    
+    # 년/월 피벗 테이블 생성
+    heatmap_data = []
+    for date, ret in monthly_ret.items():
+        heatmap_data.append({
+            'Year': date.year,
+            'Month': date.strftime('%b'), # Jan, Feb...
+            'Return': ret
+        })
+    
+    if not heatmap_data:
+        return pd.DataFrame()
+        
+    return pd.DataFrame(heatmap_data)
