@@ -30,7 +30,7 @@ from utils.price_fetcher import (
 from utils.calculator import (
     calculate_unrealized_pnl, calculate_portfolio_value, calculate_daily_realized_pnl,
     calculate_strategy_metrics, export_to_csv, calculate_portfolio_history, calculate_portfolio_history_by_currency, calculate_total_realized_pnl_from_events,
-    calculate_advanced_metrics, calculate_monthly_returns
+    calculate_advanced_metrics, calculate_monthly_returns, calculate_strategy_realized_pnl_report
 )
 
 # 페이지 설정
@@ -103,6 +103,193 @@ if st.sidebar.button("💾 백업 생성", use_container_width=True):
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"마지막 업데이트: {st.session_state.portfolio['portfolio_metadata']['last_updated']}")
+
+
+def render_strategy_performance_page(portfolio, exchange_rate):
+    st.header("📊 성과 분석 (전략별 · 실현손익 기반)")
+
+    # 전략 선택 옵션
+    strategies = portfolio.get("strategies", {})
+    if not strategies:
+        st.info("전략이 없습니다.")
+        return
+
+    strategy_options = {
+        f"{strategies[sid].get('name', sid)} ({strategies[sid].get('base_currency', 'USD')})": sid
+        for sid in strategies.keys()
+    }
+    selected_label = st.selectbox("전략 선택", list(strategy_options.keys()), key="perf_strategy_select")
+    strategy_id = strategy_options[selected_label]
+    base_currency = strategies[strategy_id].get("base_currency", "USD")
+
+    # closed_positions 기반 데이터 준비 (기간 기본값 산출용)
+    all_closed = portfolio.get("closed_positions", []) or []
+    strategy_closed = [cp for cp in all_closed if cp.get("strategy") == strategy_id]
+    if not strategy_closed:
+        st.info("해당 전략의 청산(매도 완료) 거래가 없습니다.")
+        return
+
+    sell_dates = pd.to_datetime([cp.get("sell_date") for cp in strategy_closed], errors="coerce")
+    sell_dates = sell_dates.dropna()
+    if len(sell_dates) == 0:
+        st.info("매도일(sell_date) 파싱이 불가능한 데이터가 있습니다.")
+        return
+
+    # DatetimeIndex를 Series로 변환하여 iloc 사용 가능하게 수정
+    sell_dates_series = pd.Series(sell_dates).sort_values().reset_index(drop=True)
+    default_start = sell_dates_series.iloc[0].date()
+    default_end = sell_dates_series.iloc[-1].date()
+
+    # 기간 선택 (date range)
+    date_range = st.date_input(
+        "기간 선택 (매도일 기준)",
+        value=(default_start, default_end),
+        min_value=default_start,
+        max_value=default_end,
+        key="perf_date_range"
+    )
+
+    # Streamlit은 단일 날짜/범위를 모두 반환할 수 있으니 방어적으로 처리
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range
+    else:
+        start_date, end_date = default_start, default_end
+
+    # 리포트 계산
+    trades_df, daily_df, stats = calculate_strategy_realized_pnl_report(
+        portfolio=portfolio,
+        strategy_id=strategy_id,
+        start_date=start_date,
+        end_date=end_date
+    )
+
+    # 디버그 로그(화면 표시)
+    debug_lines = []
+    debug_lines.append(f"strategy_id={strategy_id}, base_currency={base_currency}")
+    debug_lines.append(f"date_range={start_date} ~ {end_date}")
+    debug_lines.append(f"trades={len(trades_df)}, daily_rows={len(daily_df)}")
+
+    # KPI
+    st.subheader("📌 핵심 지표 (실현손익)")
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    if base_currency == "KRW":
+        c1.metric("총 실현손익", f"₩{stats['total_realized_pnl']:,.0f}")
+        c2.metric("평균 손익/거래", f"₩{stats['avg_pnl']:,.0f}")
+        c3.metric("최대 이익", f"₩{stats['max_profit']:,.0f}")
+        c4.metric("최대 손실", f"₩{stats['max_loss']:,.0f}")
+    else:
+        c1.metric("총 실현손익", f"${stats['total_realized_pnl']:,.2f}")
+        c2.metric("평균 손익/거래", f"${stats['avg_pnl']:,.2f}")
+        c3.metric("최대 이익", f"${stats['max_profit']:,.2f}")
+        c4.metric("최대 손실", f"${stats['max_loss']:,.2f}")
+
+    c5.metric("승률", f"{stats['win_rate']:.1f}%")
+
+    st.caption(f"평균 수익률(거래별): {stats['avg_return_pct']:.2f}%")
+
+    st.markdown("---")
+
+    # 일별 실현손익 차트
+    st.subheader("📈 일별 실현손익 추이 (매도일 기준)")
+    if daily_df.empty:
+        st.info("선택한 기간에 해당하는 실현손익 데이터가 없습니다.")
+    else:
+        fig = go.Figure()
+
+        fig.add_trace(go.Bar(
+            x=daily_df["date"],
+            y=daily_df["realized_pnl"],
+            name="일별 실현손익",
+            marker_color=["green" if v >= 0 else "red" for v in daily_df["realized_pnl"]]
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=daily_df["date"],
+            y=daily_df["cumulative_pnl"],
+            name="누적 실현손익",
+            yaxis="y2",
+            mode="lines",
+            line=dict(color="blue", width=2)
+        ))
+
+        y_title = "일별 실현손익 (₩)" if base_currency == "KRW" else "일별 실현손익 ($)"
+        y2_title = "누적 실현손익 (₩)" if base_currency == "KRW" else "누적 실현손익 ($)"
+
+        fig.update_layout(
+            height=420,
+            hovermode="x unified",
+            xaxis_title="날짜",
+            yaxis=dict(title=y_title),
+            yaxis2=dict(
+                title=y2_title,
+                overlaying="y",
+                side="right"
+            )
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # 거래 로그 테이블
+    st.subheader("🧾 거래 로그 (청산 완료)")
+    if trades_df.empty:
+        st.info("선택한 기간에 해당하는 청산 거래가 없습니다.")
+        st.text_area("debug", "\n".join(debug_lines), height=120)
+        return
+
+    show_cols = [
+        "sell_date_str", "buy_date_str", "ticker", "quantity",
+        "avg_buy_price", "avg_sell_price", "realized_pnl", "return_pct"
+    ]
+    view_df = trades_df[show_cols].rename(columns={
+        "sell_date_str": "매도일",
+        "buy_date_str": "매수일",
+        "ticker": "티커",
+        "quantity": "수량",
+        "avg_buy_price": "평균매수가",
+        "avg_sell_price": "평균매도가",
+        "realized_pnl": "실현손익",
+        "return_pct": "손익(%)",
+    }).copy()
+
+    # 컬럼 포맷 (Streamlit column_config)
+    if base_currency == "KRW":
+        price_fmt = "₩%d"
+        pnl_fmt = "₩%d"
+    else:
+        price_fmt = "$%.2f"
+        pnl_fmt = "$%.2f"
+
+    st.dataframe(
+        view_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "수량": st.column_config.NumberColumn("수량", format="%.8f"),
+            "평균매수가": st.column_config.NumberColumn("평균매수가", format=price_fmt),
+            "평균매도가": st.column_config.NumberColumn("평균매도가", format=price_fmt),
+            "실현손익": st.column_config.NumberColumn("실현손익", format=pnl_fmt),
+            "손익(%)": st.column_config.NumberColumn("손익(%)", format="%.2f"),
+        }
+    )
+
+    # CSV 다운로드
+    @st.cache_data
+    def _to_csv_bytes(df_):
+        return df_.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+    st.download_button(
+        label="💾 거래 로그 CSV 다운로드",
+        data=_to_csv_bytes(view_df),
+        file_name=f"trades_{strategy_id}_{start_date}_{end_date}.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+    with st.expander("🪵 디버그 로그"):
+        st.text_area("debug", "\n".join(debug_lines), height=160)
 
 # === 메뉴별 페이지 ===
 
@@ -1549,136 +1736,7 @@ elif menu == "💾 데이터 관리":
             st.info("백업 폴더가 없습니다")
 
 elif menu == "📊 성과 분석":
-    st.header("성과 분석 보고서")
-    
-    # 데이터 로딩
-    if not st.session_state.current_prices:
-        st.warning("⚠️ 먼저 사이드바에서 '가격 업데이트'를 진행해주세요.")
-    else:
-        # 기간 선택
-        col_p1, col_p2 = st.columns([1, 3])
-        with col_p1:
-            period_days = st.selectbox(
-                "분석 기간",
-                [30, 90, 180, 365, 730, 1000],
-                index=3,
-                format_func=lambda x: f"최근 {x}일"
-            )
-        
-        with st.spinner("성과 지표 계산 중..."):
-            # 1. 히스토리 데이터 생성
-            history_df = calculate_portfolio_history(
-                st.session_state.portfolio,
-                st.session_state.current_prices,
-                st.session_state.exchange_rate,
-                days=period_days
-            )
-            
-            if not history_df.empty:
-                # 2. 고급 지표 계산
-                metrics = calculate_advanced_metrics(history_df)
-                
-                # 3. 벤치마크(SPY) 데이터 - 안전하게 로딩
-                bm_df = pd.DataFrame()  # 기본값 빈 데이터프레임
-                try:
-                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-                    
-                    def load_benchmark():
-                        return get_benchmark_data('SPY', period=f"{period_days}d")
-                    
-                    with ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(load_benchmark)
-                        try:
-                            bm_df = future.result(timeout=10)  # 10초 타임아웃
-                        except FutureTimeoutError:
-                            st.warning("⚠️ 벤치마크 로딩 시간 초과 (10초). 포트폴리오 데이터만 표시합니다.")
-                            bm_df = pd.DataFrame()
-                except Exception as e:
-                    st.info(f"ℹ️ 벤치마크 로딩 실패: {str(e)}")
-                    bm_df = pd.DataFrame()
-                
-                # --- [섹션 1] 핵심 지표 카드 ---
-                st.subheader("📌 핵심 성과 지표 (Key Metrics)")
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("CAGR (연평균)", f"{metrics['cagr']:.1f}%", help="연평균 복합 성장률")
-                m2.metric("MDD (최대낙폭)", f"{metrics['mdd']:.1f}%", help="고점 대비 최대 하락폭", delta_color="inverse")
-                m3.metric("Sharpe Ratio", f"{metrics['sharpe']:.2f}", help="위험 대비 수익 비율 (높을수록 좋음)")
-                m4.metric("Sortino Ratio", f"{metrics['sortino']:.2f}", help="하락 변동성만 고려한 위험 대비 수익")
-                m5.metric("승률 (Win Rate)", f"{metrics['win_rate']:.1f}%", help="일별 수익이 양수였던 비율")
-                
-                st.markdown("---")
-                
-                # --- [섹션 2] 수익률 비교 차트 (Portfolio vs SPY) ---
-                col_c1, col_c2 = st.columns([2, 1])
-                
-                with col_c1:
-                    st.subheader("📈 누적 수익률 비교")
-                    fig_compare = go.Figure()
-                    
-                    # 내 포트폴리오
-                    fig_compare.add_trace(go.Scatter(
-                        x=history_df['date'], 
-                        y=history_df['return_pct'],
-                        mode='lines', name='My Portfolio',
-                        line=dict(color='#1f77b4', width=2)
-                    ))
-                    
-                    # 벤치마크 (SPY) - 있을 경우만 추가
-                    if not bm_df.empty and 'Close' in bm_df.columns:
-                        # SPY 누적 수익률 계산
-                        bm_df['return_pct'] = (bm_df['Close'] / bm_df['Close'].iloc[0] - 1) * 100
-                        fig_compare.add_trace(go.Scatter(
-                            x=bm_df.index, 
-                            y=bm_df['return_pct'],
-                            mode='lines', name='S&P 500 (SPY)',
-                            line=dict(color='gray', width=1, dash='dot')
-                        ))
-                    
-                    fig_compare.update_layout(height=400, hovermode='x unified', yaxis_title="누적 수익률 (%)")
-                    st.plotly_chart(fig_compare, use_container_width=True)
-
-                with col_c2:
-                    st.subheader("🌊 Underwater Plot (낙폭)")
-                    # 낙폭 영역 차트
-                    drawdown_series = metrics['daily_drawdown'] * 100
-                    fig_dd = go.Figure()
-                    fig_dd.add_trace(go.Scatter(
-                        x=history_df['date'], 
-                        y=drawdown_series,
-                        fill='tozeroy',
-                        mode='lines',
-                        line=dict(color='red', width=1),
-                        name='Drawdown'
-                    ))
-                    fig_dd.update_layout(height=400, yaxis_title="낙폭 (%)", hovermode='x unified')
-                    st.plotly_chart(fig_dd, use_container_width=True)
-
-                st.markdown("---")
-
-                # --- [섹션 3] 월별 수익률 히트맵 ---
-                st.subheader("📅 월별 수익률 히트맵")
-                monthly_df = calculate_monthly_returns(history_df)
-                
-                if not monthly_df.empty:
-                    # Pivot: Index=Year, Columns=Month
-                    heatmap_pivot = monthly_df.pivot(index="Year", columns="Month", values="Return")
-                    # 월 순서 정렬
-                    month_order = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-                    heatmap_pivot = heatmap_pivot.reindex(columns=month_order)
-                    
-                    fig_map = px.imshow(
-                        heatmap_pivot,
-                        labels=dict(x="월", y="년도", color="수익률(%)"),
-                        x=heatmap_pivot.columns,
-                        y=heatmap_pivot.index,
-                        color_continuous_scale="RdBu", # Red-Blue (중간 0)
-                        color_continuous_midpoint=0,
-                        text_auto='.1f'
-                    )
-                    fig_map.update_layout(height=400)
-                    st.plotly_chart(fig_map, use_container_width=True)
-                else:
-                    st.info("월별 데이터를 생성하기에 기간이 충분하지 않습니다.")
-
-            else:
-                st.info("분석할 히스토리 데이터가 없습니다. 포지션을 보유하고 있어야 합니다.")
+    render_strategy_performance_page(
+        portfolio=st.session_state.portfolio,
+        exchange_rate=st.session_state.exchange_rate
+    )

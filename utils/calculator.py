@@ -527,3 +527,117 @@ def calculate_monthly_returns(history_df):
         return pd.DataFrame()
         
     return pd.DataFrame(heatmap_data)
+
+def build_closed_positions_df(portfolio):
+    """
+    portfolio['closed_positions']를 표준화된 DataFrame으로 변환.
+    - sell_date를 기준으로 '실현손익'을 분석하기 위한 형태
+    """
+    rows = []
+    for cp in portfolio.get("closed_positions", []) or []:
+        rows.append({
+            "strategy": cp.get("strategy"),
+            "ticker": cp.get("ticker"),
+            "currency": cp.get("currency", "USD"),
+            "buy_date": cp.get("buy_date"),
+            "sell_date": cp.get("sell_date"),
+            "quantity": float(cp.get("quantity", 0.0) or 0.0),
+            "avg_buy_price": float(cp.get("avg_buy_price", 0.0) or 0.0),
+            "avg_sell_price": float(cp.get("avg_sell_price", 0.0) or 0.0),
+            "realized_pnl": float(cp.get("realized_pnl", 0.0) or 0.0),
+            "return_pct": float(cp.get("return_pct", 0.0) or 0.0),
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df["buy_date"] = pd.to_datetime(df["buy_date"], errors="coerce")
+    df["sell_date"] = pd.to_datetime(df["sell_date"], errors="coerce")
+    df = df.dropna(subset=["sell_date"]).sort_values(["sell_date", "ticker"])
+    return df
+
+def calculate_strategy_realized_pnl_report(portfolio, strategy_id, start_date=None, end_date=None):
+    """
+    전략별 실현손익 리포트 생성 (closed_positions 기반)
+    반환:
+      - trades_df: 개별 매매 로그 (sell_date 기준 정렬, 기간 필터 반영)
+      - daily_df: 일별 실현손익 집계 (sell_date 기준)
+      - stats: KPI용 dict
+    """
+    df = build_closed_positions_df(portfolio)
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame(), {
+            "trade_count": 0,
+            "total_realized_pnl": 0.0,
+            "win_rate": 0.0,
+            "avg_pnl": 0.0,
+            "max_profit": 0.0,
+            "max_loss": 0.0,
+            "avg_return_pct": 0.0,
+        }
+
+    df = df[df["strategy"] == strategy_id].copy()
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame(), {
+            "trade_count": 0,
+            "total_realized_pnl": 0.0,
+            "win_rate": 0.0,
+            "avg_pnl": 0.0,
+            "max_profit": 0.0,
+            "max_loss": 0.0,
+            "avg_return_pct": 0.0,
+        }
+
+    if start_date is not None:
+        start_dt = pd.to_datetime(start_date)
+        df = df[df["sell_date"] >= start_dt]
+    if end_date is not None:
+        end_dt = pd.to_datetime(end_date)
+        df = df[df["sell_date"] <= end_dt]
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame(), {
+            "trade_count": 0,
+            "total_realized_pnl": 0.0,
+            "win_rate": 0.0,
+            "avg_pnl": 0.0,
+            "max_profit": 0.0,
+            "max_loss": 0.0,
+            "avg_return_pct": 0.0,
+        }
+
+    # 개별 로그
+    trades_df = df.sort_values(["sell_date", "ticker"]).copy()
+    trades_df["sell_date_str"] = trades_df["sell_date"].dt.strftime("%Y-%m-%d")
+    trades_df["buy_date_str"] = trades_df["buy_date"].dt.strftime("%Y-%m-%d")
+
+    # 일별 집계 (매도일 기준) - 수정된 부분
+    df_daily_temp = df.copy()
+    df_daily_temp["date"] = df_daily_temp["sell_date"].dt.date
+    daily_df = df_daily_temp.groupby("date", as_index=False)["realized_pnl"].sum()
+    daily_df["date"] = pd.to_datetime(daily_df["date"])
+    daily_df = daily_df.sort_values("date")
+    daily_df["cumulative_pnl"] = daily_df["realized_pnl"].cumsum()
+
+    # KPI
+    trade_count = len(df)
+    total_realized_pnl = float(df["realized_pnl"].sum())
+    wins = int((df["realized_pnl"] > 0).sum())
+    win_rate = (wins / trade_count * 100.0) if trade_count > 0 else 0.0
+    avg_pnl = float(df["realized_pnl"].mean()) if trade_count > 0 else 0.0
+    max_profit = float(df["realized_pnl"].max()) if trade_count > 0 else 0.0
+    max_loss = float(df["realized_pnl"].min()) if trade_count > 0 else 0.0
+    avg_return_pct = float(df["return_pct"].mean()) if trade_count > 0 else 0.0
+
+    stats = {
+        "trade_count": int(trade_count),
+        "total_realized_pnl": float(total_realized_pnl),
+        "win_rate": float(win_rate),
+        "avg_pnl": float(avg_pnl),
+        "max_profit": float(max_profit),
+        "max_loss": float(max_loss),
+        "avg_return_pct": float(avg_return_pct),
+    }
+
+    return trades_df, daily_df, stats
