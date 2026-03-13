@@ -115,7 +115,19 @@ def calculate_portfolio_history(portfolio, current_prices, exchange_rate=1300.0,
         return pd.DataFrame()
     
     # 데이터프레임 생성
-    df = pd.DataFrame(historical_data)
+    cleaned_data = {}
+    for key, val in historical_data.items():
+        if isinstance(val, pd.Series):
+            # 중복 날짜가 있으면 마지막 값만 유지
+            if val.index.duplicated().any():
+                val = val[~val.index.duplicated(keep='last')]
+        cleaned_data[key] = val
+    df = pd.DataFrame(cleaned_data)
+
+    if df.index.duplicated().any():
+        df = df[~df.index.duplicated(keep='last')]
+
+    df = df.sort_index()
     df = df.ffill().bfill()
     
     # 날짜별 포트폴리오 가치 계산
